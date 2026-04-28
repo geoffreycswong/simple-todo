@@ -1,0 +1,13 @@
+node_modules/
+credentials/
+output/
+ref/
+.env
+google_drive_files.txt
+*.log
+./__pycache__/
+.gemini/notify_chat.log
+.worktrees/
+**/__pycache__/
+.pytest_cache
+.vscode
