@@ -91,13 +91,107 @@ cd frontend && npm install && npm run test
 
 ---
 
+## ☁️ Cloud Deployment (GCP)
+
+This project is designed for a **Single-Container Hybrid Deployment Strategy** on Google Cloud Run.
+
+### 1. Environment Setup
+Set these variables in your terminal:
+```bash
+export PROJECT_ID="your-project-id"
+export REGION="asia-east2"
+export DB_INSTANCE_NAME="todo-db-instance"
+export DB_NAME="todo_db"
+export DB_USER="todo_user"
+export DB_PASS="your-secure-password"
+export SERVICE_NAME="simpletodo-app"
+export REPO_NAME="simpletodo-repo"
+```
+
+### 2. Infrastructure Initialization
+```bash
+# Enable APIs
+gcloud services enable run.googleapis.com sqladmin.googleapis.com \
+    artifactregistry.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
+
+# Create Cloud SQL Instance
+gcloud sql instances create $DB_INSTANCE_NAME \
+    --database-version=POSTGRES_15 --tier=db-f1-micro --region=$REGION --root-password=$DB_PASS
+
+# Create Database & User
+gcloud sql databases create $DB_NAME --instance=$DB_INSTANCE_NAME
+gcloud sql users create $DB_USER --instance=$DB_INSTANCE_NAME --password=$DB_PASS
+```
+
+### 3. Secret & IAM Configuration
+```bash
+# Store Connection String
+INSTANCE_CONNECTION_NAME=$(gcloud sql instances describe $DB_INSTANCE_NAME --format='value(connectionName)')
+DATABASE_URL="postgresql://$DB_USER:$DB_PASS@/$DB_NAME?host=/cloudsql/$INSTANCE_CONNECTION_NAME"
+echo -n $DATABASE_URL | gcloud secrets create DATABASE_URL --data-file=-
+
+# Grant Access to Cloud Run Service Account
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+RUN_SA="$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
+
+gcloud secrets add-iam-policy-binding DATABASE_URL \
+    --member="serviceAccount:$RUN_SA" --role="roles/secretmanager.secretAccessor"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$RUN_SA" --role="roles/cloudsql.client"
+```
+
+### 4. Build & Deploy
+```bash
+# Create Repository
+gcloud artifacts repositories create $REPO_NAME --repository-format=docker --location=$REGION
+
+# Build & Push
+IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$SERVICE_NAME:latest"
+gcloud builds submit --tag $IMAGE_TAG .
+
+# Deploy to Cloud Run
+gcloud run deploy $SERVICE_NAME \
+    --image $IMAGE_TAG --region $REGION \
+    --set-secrets "DATABASE_URL=DATABASE_URL:latest" \
+    --add-cloudsql-instances $INSTANCE_CONNECTION_NAME \
+    --set-env-vars "APP_ENV=production" --allow-unauthenticated
+```
+
+### 5. Database Migrations
+Run the migrations using a Cloud Run Job:
+```bash
+gcloud run jobs create migration-job \
+    --image $IMAGE_TAG --region $REGION \
+    --set-secrets "DATABASE_URL=DATABASE_URL:latest" \
+    --set-cloudsql-instances $INSTANCE_CONNECTION_NAME \
+    --command "sh" --args="-c,cd backend && alembic upgrade head"
+
+gcloud run jobs execute migration-job --region $REGION --wait
+```
+
+---
+
 ## 🧹 Cleanup & Troubleshooting
 
-### Reset Environment
+### Local Reset
 To stop the application and wipe all persistent data (volumes, networks):
 ```bash
 docker compose down -v
 rm projects/example-todo-app/test.db  # Purge local SQLite test DB
+```
+
+### GCP Cleanup
+To tear down all cloud resources:
+```bash
+# Delete Cloud Run Service & Job
+gcloud run services delete $SERVICE_NAME --region $REGION --quiet
+gcloud run jobs delete migration-job --region $REGION --quiet
+
+# Delete Infrastructure
+gcloud sql instances delete $DB_INSTANCE_NAME --quiet
+gcloud artifacts repositories delete $REPO_NAME --location $REGION --quiet
+gcloud secrets delete DATABASE_URL --quiet
 ```
 
 ### Common Issues
@@ -105,22 +199,6 @@ rm projects/example-todo-app/test.db  # Purge local SQLite test DB
 - **Port 8000 Conflict**: Ensure no other local services (like standalone FastAPI or Uvicorn) are occupying the port before starting Docker.
 
 ---
-
-## 📁 Project Structure
-
-- `backend/app/`: FastAPI logic, models, and background tasks.
-- `backend/migrations/`: Alembic database version history.
-- `frontend/src/components/`: Modular UI elements (FilterBar, TaskItem, RRuleGenerator).
-- `frontend/src/composables/`: Shared reactive business logic (`useTasks`).
-- `docs/superpowers/plans/`: Historical implementation plans for auditability.
-
-
-You are absolutely right—mentioning Row-Level Security (RLS) for a standard SaaS TODO app is over-engineering and might signal to an interviewer that you overcomplicate simple IAM paradigms. Standard application-level tenant filtering (e.g., `where tenant_id = X`) is the industry standard. I will dial that back.
-
-Here is the drafted content for the **DevOps**, **Security/Observability**, and **Cloud Architecture** sections. This perfectly translates your local TDD and MCP validation into a production-grade cloud strategy.
-
----
-
 
 ## 🔭 Future Architectural Considerations
 
@@ -186,3 +264,13 @@ graph TD
 * **Scale-to-Zero:** Cloud Run automatically scales container instances based on concurrent request volume, optimizing cost.
 * **Network Isolation:** Cloud SQL is deployed on a private IP within a VPC network. Cloud Run accesses the database via Serverless VPC Access, ensuring the database is never exposed to the public internet.
 * **Simplified CORS:** Because Cloud Run serves both the Vue frontend assets and the FastAPI endpoints from the exact same origin, complex CORS preflight (`OPTIONS`) configurations are entirely eliminated at the infrastructure level.
+
+---
+
+## 📁 Project Structure
+
+- `backend/app/`: FastAPI logic, models, and background tasks.
+- `backend/migrations/`: Alembic database version history.
+- `frontend/src/components/`: Modular UI elements (FilterBar, TaskItem, RRuleGenerator).
+- `frontend/src/composables/`: Shared reactive business logic (`useTasks`).
+- `docs/superpowers/plans/`: Historical implementation plans for auditability.
